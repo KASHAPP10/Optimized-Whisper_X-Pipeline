@@ -1,0 +1,10 @@
+pandas
+numpy
+tqdm
+librosa
+soundfile
+noisereduce
+huggingface-hub
+whisperx @ git+https://github.com/m-bain/whisperX.git
+torch
+matplotlib
