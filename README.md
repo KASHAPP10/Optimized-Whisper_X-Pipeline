@@ -1,3 +1,13 @@
+# WhisperX Experiments
+
+This repo contains a reproducible runner for WhisperX transcription experiments, evaluation, and visualization utilities.
+
+Structure
+- `src/` — runner and helpers
+- `data/` — place raw audio and transcripts here
+- `experiments/` — outputs (CSV, PNG)
+
+See `scripts/prepare_data.sh` for a helper to unpack datasets.
 This workspace contains helper scripts to run and evaluate WhisperX-based transcriptions.
 
 Files:
