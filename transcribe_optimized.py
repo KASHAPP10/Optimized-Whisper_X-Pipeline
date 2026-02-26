@@ -285,20 +285,74 @@ def generate_hallucination_flags(text: str) -> tuple[list[str], float]:
 # ---------------------- Audio / VAD helpers ----------------------
 def _load_audio_array(path: str):
     """Load audio as a mono numpy array at 16 kHz. Uses soundfile and librosa as fallbacks."""
+    import tempfile
+    import shutil
+
+    # Try soundfile first (works for WAV/FLAC/others)
     try:
         import soundfile as sf
         a, sr = sf.read(path, dtype='float32')
         if getattr(a, 'ndim', 1) > 1:
             a = a.mean(axis=1)
     except Exception:
-        # let whisperx try
-        try:
-            a = whisperx.load_audio(path)
-            sr = 16000
-            return a, sr
-        except Exception as exc:
-            raise RuntimeError(f'Unable to load audio: {exc}')
+        a = None
+        sr = None
 
+    # Try librosa as a fallback
+    if a is None:
+        try:
+            import librosa
+            a, sr = librosa.load(path, sr=16000, mono=True)
+        except Exception:
+            a = None
+            sr = None
+
+    # Try torchaudio next (can handle some formats if compiled with ffmpeg)
+    if a is None:
+        try:
+            import torchaudio
+            wav, sr_t = torchaudio.load(path)
+            import numpy as _np
+            if wav.ndim > 1:
+                wav = wav.mean(dim=0)
+            a = wav.numpy().astype('float32')
+            sr = int(sr_t)
+        except Exception:
+            a = None
+            sr = None
+
+    # Final fallback: invoke a local ffmpeg (if present) to convert to 16k WAV
+    if a is None:
+        ffmpeg_path = shutil.which('ffmpeg')
+        if ffmpeg_path:
+            tmp_wav = None
+            try:
+                fd, tmp_wav = tempfile.mkstemp(suffix='.wav')
+                os.close(fd)
+                cmd = [ffmpeg_path, '-y', '-i', path, '-ar', '16000', '-ac', '1', tmp_wav]
+                import subprocess
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import soundfile as sf
+                a, sr = sf.read(tmp_wav, dtype='float32')
+                if getattr(a, 'ndim', 1) > 1:
+                    a = a.mean(axis=1)
+            except Exception as exc:
+                raise RuntimeError(f"Unable to load audio via ffmpeg fallback: {exc}")
+            finally:
+                try:
+                    if tmp_wav and os.path.exists(tmp_wav):
+                        os.remove(tmp_wav)
+                except Exception:
+                    pass
+        else:
+            # If whisperx is available, try its loader as an additional fallback
+            try:
+                a = whisperx.load_audio(path)
+                sr = 16000
+            except Exception as exc:
+                raise RuntimeError(f"Unable to load audio: no suitable loader found (install ffmpeg or use WAV input). Original error: {exc}")
+
+    # ensure sample rate is 16000
     if sr != 16000:
         try:
             import librosa
@@ -370,8 +424,30 @@ def load_whisper_model(model_name: str = "small", device: str | None = None):
     except Exception:
         pass
 
-    model = whisperx.load_model(model_name, compute_type="float32", device=device, asr_options=asr_options, language='en')
-    return model
+    try:
+        model = whisperx.load_model(model_name, compute_type="float32", device=device, asr_options=asr_options, language='en')
+        model._is_whisper_fallback = False
+        return model
+    except Exception as e:
+        # Graceful fallback to openai-whisper if whisperx/model loading fails
+        print(f"whisperx.load_model failed: {type(e).__name__} {e}. Falling back to openai-whisper model.")
+        try:
+            import whisper as _whisper_base
+            _whisper_m = _whisper_base.load_model(model_name, device=device)
+
+            class _WhisperFallbackAdapter:
+                def __init__(self, whisper_model):
+                    self._wm = whisper_model
+                    self._is_whisper_fallback = True
+
+                def transcribe(self, audio, **kwargs):
+                    # openai-whisper accepts file paths or numpy arrays
+                    return self._wm.transcribe(audio, **kwargs)
+
+            adapter = _WhisperFallbackAdapter(_whisper_m)
+            return adapter
+        except Exception as e2:
+            raise RuntimeError(f"Both whisperx and fallback whisper failed: {e2}")
 
 
 def process_audio_in_chunks_optimized(audio_path: str, model, chunk_duration: int = CHUNK_DURATION):
